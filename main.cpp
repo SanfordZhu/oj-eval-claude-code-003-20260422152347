@@ -26,6 +26,7 @@ struct ProblemState {
     int frozen_attempts = 0;
     bool frozen_has_ac = false;
     int frozen_ac_time = -1;
+    int frozen_wrong_before_ac = 0; // wrong submissions during freeze before first AC
     bool is_frozen = false;
 };
 
@@ -91,6 +92,14 @@ int get_rank(const string& name) {
     auto it = team_idx.find(name);
     if (it == team_idx.end()) return -1;
     int idx = it->second;
+    if (!ranking_valid) {
+        // Before first flush, ranking is by lexicographic order of team names
+        int r = 1;
+        for (const auto& t : teams) {
+            if (t.name < name) r++;
+        }
+        return r;
+    }
     for (int i = 0; i < (int)ranking.size(); i++)
         if (ranking[i] == idx) return i + 1;
     return -1;
@@ -130,7 +139,12 @@ void do_freeze() {
             } else {
                 ps.solved_before_freeze = false;
                 ps.frozen_wrong_before = ps.wrong_attempts;
-                ps.is_frozen = (ps.frozen_attempts > 0);
+                // Reset frozen tracking for this freeze period
+                ps.frozen_attempts = 0;
+                ps.frozen_has_ac = false;
+                ps.frozen_ac_time = -1;
+                ps.frozen_wrong_before_ac = 0;
+                ps.is_frozen = false;
             }
         }
     }
@@ -186,12 +200,16 @@ void do_scroll() {
 
         if (ps.frozen_has_ac) {
             team.solved++;
-            team.penalty += 20 * ps.frozen_wrong_before + ps.frozen_ac_time;
+            int total_wrong_before_ac = ps.frozen_wrong_before + ps.frozen_wrong_before_ac;
+            team.penalty += 20 * total_wrong_before_ac + ps.frozen_ac_time;
             auto it = lower_bound(team.solve_times.begin(), team.solve_times.end(), ps.frozen_ac_time);
             team.solve_times.insert(it, ps.frozen_ac_time);
-            ps.wrong_before_ac = ps.frozen_wrong_before;
+            ps.wrong_before_ac = total_wrong_before_ac;
             ps.solved_time = ps.frozen_ac_time;
         }
+
+        // Save old ranking to determine displaced team
+        vector<int> old_ranking = ranking;
 
         // Bubble the team up to its correct position
         int cur_r = lowest_r;
@@ -201,7 +219,8 @@ void do_scroll() {
         }
 
         if (cur_r < lowest_r) {
-            int displaced_ti = ranking[lowest_r];
+            // The team that was at cur_r (new position) in the OLD ranking is the one "replaced"
+            int displaced_ti = old_ranking[cur_r];
             cout << team.name << " " << teams[displaced_ti].name << " "
                  << team.solved << " " << team.penalty << "\n";
         }
@@ -215,6 +234,22 @@ void do_scroll() {
         for (int p = 0; p < M; p++)
             cout << " " << prob_str(team, p, false);
         cout << "\n";
+    }
+
+    // After scroll, merge frozen state into wrong_attempts for unsolved problems
+    for (auto& team : teams) {
+        for (int p = 0; p < M; p++) {
+            ProblemState& ps = team.probs[p];
+            if (ps.solved_time == -1) {
+                ps.wrong_attempts += ps.frozen_attempts;
+            }
+            // Reset frozen tracking for next freeze
+            ps.frozen_attempts = 0;
+            ps.frozen_has_ac = false;
+            ps.frozen_ac_time = -1;
+            ps.frozen_wrong_before_ac = 0;
+            ps.is_frozen = false;
+        }
     }
 }
 
@@ -275,8 +310,13 @@ int main() {
             if (frozen_state) {
                 ps.frozen_attempts++;
                 if (is_ac(status)) {
-                    ps.frozen_has_ac = true;
-                    if (ps.frozen_ac_time == -1) ps.frozen_ac_time = time;
+                    if (!ps.frozen_has_ac) {
+                        // First AC during freeze
+                        ps.frozen_has_ac = true;
+                        ps.frozen_ac_time = time;
+                        // Wrong submissions during freeze before this AC
+                        ps.frozen_wrong_before_ac = ps.frozen_attempts - 1;
+                    }
                 }
                 if (!ps.solved_before_freeze) ps.is_frozen = true;
             } else {
